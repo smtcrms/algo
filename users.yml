@@ -1,0 +1,90 @@
+---
+- hosts: localhost
+  gather_facts: False
+  tags: always
+  vars_files:
+    - config.cfg
+
+  tasks:
+    - block:
+        - name: Server address prompt
+          pause:
+            prompt: "Enter the IP address of your server: (or use localhost for local installation)"
+          register: _server
+          when: server is undefined
+
+        - name: Set facts based on the input
+          set_fact:
+            algo_server: >-
+              {% if server is defined %}{{ server }}
+              {%- elif _server.user_input %}{{ _server.user_input }}
+              {%- else %}omit{% endif %}
+
+        - name: Import host specific variables
+          include_vars:
+            file: "configs/{{ algo_server }}/.config.yml"
+
+        - name: CA password prompt
+          pause:
+            prompt: Enter the password for the private CA key
+            echo: false
+          register: _ca_password
+          when:
+            - ca_password is undefined
+            - ipsec_enabled
+
+        - name: Set facts based on the input
+          set_fact:
+            CA_password: >-
+              {% if ca_password is defined %}{{ ca_password }}
+              {%- elif _ca_password.user_input %}{{ _ca_password.user_input }}
+              {%- else %}omit{% endif %}
+
+        - name: Local pre-tasks
+          import_tasks: playbooks/cloud-pre.yml
+          become: false
+
+        - name: Add the server to the vpn-host group
+          add_host:
+            name: "{{ algo_server }}"
+            groups: vpn-host
+            ansible_ssh_user: "{{ server_user|default('root') }}"
+            ansible_connection: "{% if algo_server == 'localhost' %}local{% else %}ssh{% endif %}"
+            ansible_python_interpreter: "/usr/bin/python3"
+            CA_password: "{{ CA_password }}"
+      rescue:
+        - include_tasks: playbooks/rescue.yml
+
+- name: User management
+  hosts: vpn-host
+  gather_facts: true
+  become: true
+  vars_files:
+    - config.cfg
+    - "configs/{{ inventory_hostname }}/.config.yml"
+
+  tasks:
+    - block:
+      - import_role:
+          name: common
+
+      - import_role:
+          name: wireguard
+        when: wireguard_enabled
+
+      - import_role:
+          name: strongswan
+        when: ipsec_enabled
+        tags: ipsec
+
+      - import_role:
+          name: ssh_tunneling
+        when: algo_ssh_tunneling
+
+      - debug:
+          msg:
+            - "{{ congrats.common.split('\n') }}"
+            - "    {% if p12.changed %}{{ congrats.p12_pass }}{% endif %}"
+        tags: always
+      rescue:
+        - include_tasks: playbooks/rescue.yml
